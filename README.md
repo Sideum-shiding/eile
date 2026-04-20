@@ -1,11 +1,11 @@
 # MSI App Player Subway Surfers Avoidance Bot
 
-Python script that watches Subway Surfers in the `MSI App Player` window, detects risky objects with OpenCV, and uses lane changes, jumps, and rolls to avoid obstacles.
+Native C++ and Python scripts that watch Subway Surfers in the `MSI App Player` window, detect risky objects with OpenCV, and use lane changes, jumps, and rolls to avoid obstacles.
 
 ## Features
 
-- Fast screen capture with `mss`
-- Window lookup with `pygetwindow`
+- Native C++ screen capture with WinAPI `BitBlt`
+- Python fallback with `mss` and `pygetwindow`
 - Gameplay ROI from 45% to 92% of the window height
 - HSV coin mask, saturated-object mask, dark-object mask, and Canny edge mask
 - Three-lane danger scoring with `cv2.countNonZero()`
@@ -15,13 +15,13 @@ Python script that watches Subway Surfers in the `MSI App Player` window, detect
 - Separate cooldowns for horizontal and vertical actions
 - OpenCV mask preview with lane borders and action text
 
-## Install
+## Python Install
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-## Run
+## Python Run
 
 ```powershell
 python main.py --activate
@@ -64,3 +64,31 @@ python main.py --activate --key-hold 0.08
 ```
 
 Move the mouse to a screen corner to trigger PyAutoGUI fail-safe.
+
+## C++ Build
+
+The C++ version needs a C++ OpenCV SDK and a CMake-compatible build tool, not only the Python `opencv-python` wheel.
+Install OpenCV for C++ and point CMake at its `OpenCVConfig.cmake`.
+
+```powershell
+cmake -S . -B build -DOpenCV_DIR="C:\path\to\opencv\build"
+cmake --build build --config Release
+```
+
+## C++ Run
+
+```powershell
+.\build\Release\subway_bot_cpp.exe --activate
+```
+
+If you build with MinGW or a single-config generator, the executable may be here instead:
+
+```powershell
+.\build\subway_bot_cpp.exe --activate
+```
+
+Maximum FPS mode:
+
+```powershell
+.\build\Release\subway_bot_cpp.exe --activate --no-debug
+```
