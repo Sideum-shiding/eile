@@ -37,4 +37,16 @@ Tune noise sensitivity:
 python main.py --activate --coin-threshold 20
 ```
 
+Check whether the emulator receives keys and whether the mask sees coins:
+
+```powershell
+python main.py --activate --test-press --print-stats
+```
+
+If the emulator misses short taps, increase key hold time:
+
+```powershell
+python main.py --activate --key-hold 0.08
+```
+
 Move the mouse to a screen corner to trigger PyAutoGUI fail-safe.

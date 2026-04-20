@@ -16,6 +16,7 @@ SECTORS = ("left", "center", "right")
 ROI_TOP_RATIO = 0.60
 ROI_BOTTOM_RATIO = 0.85
 COOLDOWN_SECONDS = 0.20
+KEY_HOLD_SECONDS = 0.04
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,34 @@ def next_move(current_sector_index: int, target_sector_index: int) -> str | None
     return None
 
 
+def focus_window(window) -> None:
+    try:
+        if window.isMinimized:
+            window.restore()
+            time.sleep(0.05)
+        window.activate()
+    except Exception as exc:
+        print(f"Could not activate target window: {exc}")
+
+
+def press_game_key(window, key: str, *, focus_before_press: bool, key_hold: float) -> None:
+    if focus_before_press:
+        focus_window(window)
+        time.sleep(0.03)
+
+    pyautogui.keyDown(key)
+    time.sleep(key_hold)
+    pyautogui.keyUp(key)
+
+
+def print_sector_stats(stats: list[SectorStats], current_sector_index: int, target_sector_index: int, prefix: str = "stats") -> None:
+    print(
+        f"{prefix}: left={stats[0].gold_pixels}, center={stats[1].gold_pixels}, "
+        f"right={stats[2].gold_pixels}; current={SECTORS[current_sector_index]}, "
+        f"target={SECTORS[target_sector_index]}"
+    )
+
+
 def draw_debug_mask(
     mask: np.ndarray,
     stats: list[SectorStats],
@@ -164,11 +193,19 @@ def run(args: argparse.Namespace) -> None:
 
     window = find_window(args.title)
     if args.activate:
-        window.activate()
+        focus_window(window)
         time.sleep(0.2)
 
     current_sector_index = SECTORS.index(args.start_sector)
     last_press_at = 0.0
+    last_stats_at = 0.0
+
+    if args.test_press:
+        print("Sending test presses: left, right.")
+        press_game_key(window, "left", focus_before_press=True, key_hold=args.key_hold)
+        time.sleep(args.cooldown)
+        press_game_key(window, "right", focus_before_press=True, key_hold=args.key_hold)
+        time.sleep(args.cooldown)
 
     print(
         f'Watching "{args.title}" ROI {ROI_TOP_RATIO:.0%}-{ROI_BOTTOM_RATIO:.0%}. '
@@ -199,14 +236,18 @@ def run(args: argparse.Namespace) -> None:
                 now = time.time()
                 move = next_move(current_sector_index, target_sector.index)
                 if move and now - last_press_at >= args.cooldown:
-                    pyautogui.press(move)
+                    press_game_key(
+                        window,
+                        move,
+                        focus_before_press=not args.no_focus_before_press,
+                        key_hold=args.key_hold,
+                    )
                     current_sector_index += -1 if move == "left" else 1
                     last_press_at = now
-                    print(
-                        f"gold pixels: left={stats[0].gold_pixels}, "
-                        f"center={stats[1].gold_pixels}, right={stats[2].gold_pixels}; "
-                        f"pressed {move}, current={SECTORS[current_sector_index]}"
-                    )
+                    print_sector_stats(stats, current_sector_index, target_sector.index, prefix=f"pressed {move}")
+                elif args.print_stats and now - last_stats_at >= args.stats_interval:
+                    print_sector_stats(stats, current_sector_index, target_sector.index)
+                    last_stats_at = now
 
                 debug = draw_debug_mask(mask, stats, current_sector_index, target_sector.index)
                 cv2.imshow("No Coin sector mask", debug)
@@ -237,6 +278,12 @@ def parse_args() -> argparse.Namespace:
         help="Minimum seconds between left/right key presses.",
     )
     parser.add_argument(
+        "--key-hold",
+        type=float,
+        default=KEY_HOLD_SECONDS,
+        help="Seconds to hold a key down. Some emulators miss ultra-short taps.",
+    )
+    parser.add_argument(
         "--start-sector",
         choices=SECTORS,
         default="center",
@@ -249,6 +296,27 @@ def parse_args() -> argparse.Namespace:
         help="Minimum yellow pixels in the current sector before the bot changes lanes.",
     )
     parser.add_argument("--activate", action="store_true", help="Activate the target window on start.")
+    parser.add_argument(
+        "--no-focus-before-press",
+        action="store_true",
+        help="Do not activate the MSI App Player window before each key press.",
+    )
+    parser.add_argument(
+        "--test-press",
+        action="store_true",
+        help="Send left and right once at startup to verify that the emulator receives keys.",
+    )
+    parser.add_argument(
+        "--print-stats",
+        action="store_true",
+        help="Print sector pixel counters periodically.",
+    )
+    parser.add_argument(
+        "--stats-interval",
+        type=float,
+        default=0.5,
+        help="Seconds between --print-stats log lines.",
+    )
     return parser.parse_args()
 
 
