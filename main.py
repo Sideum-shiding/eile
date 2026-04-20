@@ -1,206 +1,149 @@
 import argparse
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import cv2
 import mss
 import numpy as np
 import pyautogui
+import pygetwindow as gw
 
 
 WINDOW_TITLE = "MSI App Player"
-TARGET_RGB = (255, 215, 0)
+GOLD_LOWER_HSV = np.array([20, 100, 100], dtype=np.uint8)
+GOLD_UPPER_HSV = np.array([30, 255, 255], dtype=np.uint8)
+SECTORS = ("left", "center", "right")
 ROI_TOP_RATIO = 0.50
-ROI_BOTTOM_RATIO = 0.80
+COOLDOWN_SECONDS = 0.20
 
 
 @dataclass(frozen=True)
-class Detection:
-    x: int
-    y: int
-    area: float
-    sector: str
-
-
-@dataclass(frozen=True)
-class RoiRegion:
+class CaptureRegion:
     left: int
     top: int
     width: int
     height: int
-    offset_y: int
 
 
 @dataclass(frozen=True)
-class ColorThreshold:
-    lower: np.ndarray
-    upper: np.ndarray
-    kernel: np.ndarray
+class SectorStats:
+    name: str
+    index: int
+    x1: int
+    x2: int
+    gold_pixels: int
 
 
 def find_window(title: str):
-    windows = pyautogui.getWindowsWithTitle(title)
-    visible_windows = [window for window in windows if window.width > 0 and window.height > 0]
-
-    if not visible_windows:
+    windows = [window for window in gw.getWindowsWithTitle(title) if window.width > 0 and window.height > 0]
+    if not windows:
         raise RuntimeError(f'Window with title "{title}" was not found.')
+    return windows[0]
 
-    return visible_windows[0]
 
-
-def get_window_region(window) -> tuple[int, int, int, int]:
+def get_lower_half_region(window) -> CaptureRegion:
     left = max(0, int(window.left))
     top = max(0, int(window.top))
     width = max(1, int(window.width))
     height = max(1, int(window.height))
-    return left, top, width, height
+    roi_top = top + int(height * ROI_TOP_RATIO)
+    roi_height = max(1, height - int(height * ROI_TOP_RATIO))
+    return CaptureRegion(left=left, top=roi_top, width=width, height=roi_height)
 
 
-def get_roi_region(window) -> RoiRegion:
-    left, top, width, height = get_window_region(window)
-    roi_offset_y = int(height * ROI_TOP_RATIO)
-    roi_bottom = int(height * ROI_BOTTOM_RATIO)
-    roi_height = max(1, roi_bottom - roi_offset_y)
-    return RoiRegion(
-        left=left,
-        top=top + roi_offset_y,
-        width=width,
-        height=roi_height,
-        offset_y=roi_offset_y,
-    )
-
-
-def roi_to_mss_monitor(roi: RoiRegion) -> dict[str, int]:
+def region_to_monitor(region: CaptureRegion) -> dict[str, int]:
     return {
-        "left": roi.left,
-        "top": roi.top,
-        "width": roi.width,
-        "height": roi.height,
+        "left": region.left,
+        "top": region.top,
+        "width": region.width,
+        "height": region.height,
     }
 
 
-def grab_roi_frame(sct, roi: RoiRegion) -> np.ndarray:
-    return np.asarray(sct.grab(roi_to_mss_monitor(roi)), dtype=np.uint8)
+def grab_frame(sct, region: CaptureRegion) -> np.ndarray:
+    return np.asarray(sct.grab(region_to_monitor(region)), dtype=np.uint8)
 
 
-def build_gold_threshold(tolerance: int) -> ColorThreshold:
-    target = np.uint8([[TARGET_RGB]])
-    target_hsv = cv2.cvtColor(target, cv2.COLOR_RGB2HSV)[0][0]
-
-    hue_tolerance = max(4, tolerance // 5)
-    saturation_tolerance = tolerance
-    value_tolerance = tolerance
-
-    lower = np.array(
-        [
-            max(0, int(target_hsv[0]) - hue_tolerance),
-            max(0, int(target_hsv[1]) - saturation_tolerance),
-            max(0, int(target_hsv[2]) - value_tolerance),
-        ],
-        dtype=np.uint8,
-    )
-    upper = np.array(
-        [
-            min(179, int(target_hsv[0]) + hue_tolerance),
-            min(255, int(target_hsv[1]) + saturation_tolerance),
-            min(255, int(target_hsv[2]) + value_tolerance),
-        ],
-        dtype=np.uint8,
-    )
-
-    kernel = np.ones((5, 5), dtype=np.uint8)
-    return ColorThreshold(lower=lower, upper=upper, kernel=kernel)
-
-
-def build_gold_mask(frame_bgra: np.ndarray, threshold: ColorThreshold) -> np.ndarray:
+def build_gold_mask(frame_bgra: np.ndarray) -> np.ndarray:
     frame_bgr = frame_bgra[:, :, :3]
     frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(frame_hsv, threshold.lower, threshold.upper)
-
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, threshold.kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, threshold.kernel)
-    return mask
+    return cv2.inRange(frame_hsv, GOLD_LOWER_HSV, GOLD_UPPER_HSV)
 
 
-def classify_sector(x: int, frame_width: int) -> str:
-    left_boundary = frame_width / 3
-    right_boundary = frame_width * 2 / 3
+def split_sector_bounds(width: int) -> list[tuple[int, int]]:
+    first = width // 3
+    second = (width * 2) // 3
+    return [(0, first), (first, second), (second, width)]
 
-    if x < left_boundary:
+
+def count_gold_by_sector(mask: np.ndarray) -> list[SectorStats]:
+    bounds = split_sector_bounds(mask.shape[1])
+    stats = []
+
+    for index, (x1, x2) in enumerate(bounds):
+        sector_mask = mask[:, x1:x2]
+        stats.append(
+            SectorStats(
+                name=SECTORS[index],
+                index=index,
+                x1=x1,
+                x2=x2,
+                gold_pixels=cv2.countNonZero(sector_mask),
+            )
+        )
+
+    return stats
+
+
+def choose_safest_sector(stats: list[SectorStats]) -> SectorStats:
+    return min(stats, key=lambda sector: (sector.gold_pixels, abs(sector.index - 1)))
+
+
+def next_move(current_sector_index: int, target_sector_index: int) -> str | None:
+    if target_sector_index < current_sector_index:
         return "left"
-    if x < right_boundary:
-        return "center"
-    return "right"
-
-
-def detect_gold_object(
-    frame_bgra: np.ndarray,
-    *,
-    min_area: float,
-    roi_offset_y: int,
-    full_width: int,
-    threshold: ColorThreshold,
-) -> Optional[Detection]:
-    mask = build_gold_mask(frame_bgra, threshold)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    if not contours:
-        return None
-
-    contour = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(contour)
-    if area < min_area:
-        return None
-
-    moments = cv2.moments(contour)
-    if moments["m00"] == 0:
-        return None
-
-    x = int(moments["m10"] / moments["m00"])
-    y = int(moments["m01"] / moments["m00"]) + roi_offset_y
-    sector = classify_sector(x, full_width)
-    return Detection(x=x, y=y, area=area, sector=sector)
-
-
-def action_for_detection(detection: Detection) -> Optional[str]:
-    if detection.sector == "center":
-        return "left"
-    if detection.sector == "left":
+    if target_sector_index > current_sector_index:
         return "right"
     return None
 
 
-def draw_debug(
-    frame_bgra: np.ndarray,
-    detection: Optional[Detection],
-    *,
-    roi_offset_y: int,
-) -> np.ndarray:
-    debug = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
-    height, width = debug.shape[:2]
+def draw_debug_mask(mask: np.ndarray, stats: list[SectorStats], current_sector_index: int, target_sector_index: int) -> np.ndarray:
+    debug = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    height, width = mask.shape[:2]
 
-    cv2.line(debug, (width // 3, 0), (width // 3, height), (255, 255, 255), 1)
-    cv2.line(debug, (width * 2 // 3, 0), (width * 2 // 3, height), (255, 255, 255), 1)
+    for x in (width // 3, (width * 2) // 3):
+        cv2.line(debug, (x, 0), (x, height), (0, 255, 255), 2)
 
-    if detection:
-        roi_y = detection.y - roi_offset_y
-        cv2.circle(debug, (detection.x, roi_y), 12, (0, 255, 255), 2)
+    for sector in stats:
+        color = (0, 255, 0) if sector.index == target_sector_index else (255, 255, 255)
+        if sector.index == current_sector_index:
+            cv2.rectangle(debug, (sector.x1 + 3, 3), (sector.x2 - 3, height - 3), (255, 0, 0), 2)
+
         cv2.putText(
             debug,
-            f"{detection.sector} area={int(detection.area)}",
-            (max(0, detection.x - 80), max(25, roi_y - 20)),
+            f"{sector.name}: {sector.gold_pixels}",
+            (sector.x1 + 10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
-            (0, 255, 255),
+            color,
             2,
             cv2.LINE_AA,
         )
 
+    cv2.putText(
+        debug,
+        f"current={SECTORS[current_sector_index]} target={SECTORS[target_sector_index]}",
+        (10, height - 15),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
     return debug
 
 
-def run_bot(args: argparse.Namespace) -> None:
+def run(args: argparse.Namespace) -> None:
     pyautogui.PAUSE = 0
     pyautogui.FAILSAFE = True
 
@@ -209,73 +152,72 @@ def run_bot(args: argparse.Namespace) -> None:
         window.activate()
         time.sleep(0.2)
 
-    input_locked_until = 0.0
-    threshold = build_gold_threshold(args.tolerance)
+    current_sector_index = SECTORS.index(args.start_sector)
+    last_press_at = 0.0
+
     print(
-        f'Watching "{args.title}" ROI {ROI_TOP_RATIO:.0%}-{ROI_BOTTOM_RATIO:.0%}. '
-        "Move the mouse to a screen corner to stop PyAutoGUI."
+        f'Watching "{args.title}" lower half. '
+        "Press q in the OpenCV window to quit, or move mouse to a screen corner."
     )
 
     with mss.mss() as sct:
         while True:
             try:
-                roi = get_roi_region(window)
-                frame_bgra = grab_roi_frame(sct, roi)
-                now = time.monotonic()
+                region = get_lower_half_region(window)
+                frame_bgra = grab_frame(sct, region)
+                mask = build_gold_mask(frame_bgra)
+                stats = count_gold_by_sector(mask)
+                safest_sector = choose_safest_sector(stats)
 
-                detection = detect_gold_object(
-                    frame_bgra,
-                    min_area=args.min_area,
-                    roi_offset_y=roi.offset_y,
-                    full_width=roi.width,
-                    threshold=threshold,
-                )
-                action = action_for_detection(detection) if detection else None
-
-                if action and now >= input_locked_until:
-                    pyautogui.press(action)
-                    input_locked_until = now + args.cooldown
+                now = time.time()
+                move = next_move(current_sector_index, safest_sector.index)
+                if move and now - last_press_at >= args.cooldown:
+                    pyautogui.press(move)
+                    current_sector_index += -1 if move == "left" else 1
+                    last_press_at = now
                     print(
-                        f"Detected gold object in {detection.sector} sector "
-                        f"at ({detection.x}, {detection.y}); pressed {action}."
+                        f"gold pixels: left={stats[0].gold_pixels}, "
+                        f"center={stats[1].gold_pixels}, right={stats[2].gold_pixels}; "
+                        f"pressed {move}, current={SECTORS[current_sector_index]}"
                     )
 
-                if args.debug:
-                    cv2.imshow(
-                        "MSI App Player detector ROI",
-                        draw_debug(frame_bgra, detection, roi_offset_y=roi.offset_y),
-                    )
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
+                debug = draw_debug_mask(mask, stats, current_sector_index, safest_sector.index)
+                cv2.imshow("No Coin sector mask", debug)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
 
-                if args.interval > 0:
-                    time.sleep(args.interval)
             except KeyboardInterrupt:
                 break
             except pyautogui.FailSafeException:
                 print("PyAutoGUI fail-safe triggered.")
                 break
 
-    if args.debug:
-        cv2.destroyAllWindows()
+    cv2.destroyAllWindows()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Detect a gold RGB(255, 215, 0) object in the MSI App Player window "
-            "and press left/right according to its sector."
+            'Watch the "MSI App Player" window and keep the player in the sector '
+            "with the fewest gold pixels."
         )
     )
     parser.add_argument("--title", default=WINDOW_TITLE, help="Target window title.")
-    parser.add_argument("--min-area", type=float, default=80.0, help="Minimum contour area.")
-    parser.add_argument("--tolerance", type=int, default=45, help="HSV color tolerance.")
-    parser.add_argument("--cooldown", type=float, default=0.2, help="Seconds to ignore input after a key press.")
-    parser.add_argument("--interval", type=float, default=0.0, help="Delay between frames.")
+    parser.add_argument(
+        "--cooldown",
+        type=float,
+        default=COOLDOWN_SECONDS,
+        help="Minimum seconds between left/right key presses.",
+    )
+    parser.add_argument(
+        "--start-sector",
+        choices=SECTORS,
+        default="center",
+        help="Initial player sector assumed by the bot.",
+    )
     parser.add_argument("--activate", action="store_true", help="Activate the target window on start.")
-    parser.add_argument("--debug", action="store_true", help="Show detection preview. Press q to exit.")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    run_bot(parse_args())
+    run(parse_args())

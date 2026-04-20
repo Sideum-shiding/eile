@@ -1,14 +1,16 @@
-# MSI App Player Gold Detector Bot
+# MSI App Player No Coin Tester
 
-Python bot that watches the `MSI App Player` window, detects gold objects with OpenCV, and sends keyboard input through PyAutoGUI.
+Python script that watches the `MSI App Player` window, detects gold-colored UI objects with OpenCV, and keeps the player in the safest vertical sector.
 
 ## Features
 
 - Fast screen capture with `mss`
-- ROI scanning from 50% to 80% of the window height
-- OpenCV color detection for `RGB(255, 215, 0)`
-- Cooldown after each key press to avoid input spam
-- Optional debug preview
+- Window lookup with `pygetwindow`
+- Lower-half ROI scanning
+- HSV gold mask with `[20, 100, 100]` to `[30, 255, 255]`
+- Three-sector `cv2.countNonZero()` scoring
+- 200ms cooldown between key presses
+- OpenCV mask preview with sector borders
 
 ## Install
 
@@ -22,10 +24,10 @@ pip install -r requirements.txt
 python main.py --activate
 ```
 
-With debug preview:
+The script opens an OpenCV preview window. Press `q` inside that window to quit.
 
 ```powershell
-python main.py --activate --debug
+python main.py --activate --start-sector center
 ```
 
 Move the mouse to a screen corner to trigger PyAutoGUI fail-safe.
